@@ -1,0 +1,13 @@
+create extension if not exists pgcrypto;
+create type public.app_role as enum ('super_admin', 'procurement_manager');
+create table public.profiles (id uuid primary key references auth.users(id) on delete cascade, full_name text, role public.app_role not null default 'procurement_manager', created_at timestamptz not null default now());
+create table public.invoices (id uuid primary key default gen_random_uuid(), omni_id text unique not null, supplier_name text not null, invoice_number text, invoice_date date not null, currency text not null check (currency in ('USD','ZWG','ZAR')), amount numeric(18,2) not null, usd_rate numeric(18,8) not null, usd_amount numeric(18,2) generated always as (amount * usd_rate) stored, status text, raw_data jsonb, created_at timestamptz not null default now());
+create index invoices_date_idx on public.invoices(invoice_date); create index invoices_supplier_idx on public.invoices(supplier_name);
+create or replace function public.handle_new_user() returns trigger language plpgsql security definer set search_path = public as $$ begin insert into public.profiles(id, full_name) values(new.id, coalesce(new.raw_user_meta_data->>'full_name', new.email)); return new; end; $$;
+create trigger on_auth_user_created after insert on auth.users for each row execute procedure public.handle_new_user();
+create or replace function public.is_admin() returns boolean language sql stable security definer set search_path = public as $$ select exists(select 1 from public.profiles where id=auth.uid() and role='super_admin'); $$;
+alter table public.profiles enable row level security; alter table public.invoices enable row level security;
+create policy "users read own profile" on public.profiles for select using (id=auth.uid() or public.is_admin());
+create policy "admins update roles" on public.profiles for update using (public.is_admin());
+create policy "authenticated read invoices" on public.invoices for select to authenticated using (true);
+create policy "admins and managers write invoices" on public.invoices for all to authenticated using (exists(select 1 from public.profiles where id=auth.uid() and role in ('super_admin','procurement_manager'))) with check (exists(select 1 from public.profiles where id=auth.uid() and role in ('super_admin','procurement_manager')));
